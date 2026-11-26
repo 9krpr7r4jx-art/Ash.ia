@@ -1,6 +1,6 @@
 """
 Ash.ia — Lanceur universel (Render + Local).
-Usage : python ash.py
+Sert l'API ET le site HTML sur le même port sur Render.
 """
 import json
 import os
@@ -17,27 +17,24 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 # ---------- CONFIGURATION ----------
-# Détection de l'environnement Render
 IS_RENDER = os.environ.get("RENDER") is not None
 
-# L'adresse de ton Ollama (via ngrok)
 # ⚠️ REMPLACE CE LIEN par ton adresse ngrok actuelle
 OLLAMA_URL = "https://TON-LIEN-NGROK.ngrok-free.app/api/chat"
 OLLAMA_TAGS = "https://TON-LIEN-NGROK.ngrok-free.app/api/tags"
 
 DEFAULT_MODEL = "qwen2.5-coder:3b"
 
-# Ports : Render utilise la variable PORT, en local on garde 8000 et 8080
+# Ports
 API_PORT = int(os.environ.get("PORT", 8000)) if IS_RENDER else 8000
 SITE_PORT = 8080
 
-# Hôte : Render exige 0.0.0.0, en local on garde 127.0.0.1
+# Hôtes
 HOST = "0.0.0.0" if IS_RENDER else "127.0.0.1"
 
 BASE_DIR = Path(__file__).parent.resolve()
 INDEX_FILE = BASE_DIR / "index.html"
 
-# Options Ollama
 OLLAMA_OPTIONS = {
     "temperature": 0.6,
     "top_p": 0.9,
@@ -79,11 +76,9 @@ def port_free(port):
         s.close()
 
 def ensure_ollama():
-    # Sur Render, on ne lance pas Ollama
     if IS_RENDER:
         log("Render environment detected. Skipping local Ollama startup.")
         return None
-        
     if http_get_ok(OLLAMA_TAGS):
         log("Ollama already running ✔")
         return None
@@ -141,12 +136,21 @@ class AshAPI(BaseHTTPRequestHandler):
             self._cors()
             self.end_headers()
             self.wfile.write(b'{"status":"ok"}')
-        elif self.path == "/" and IS_RENDER:
-            # Petite page d'accueil pour Render
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(b"<h1>Ash.ia API is running</h1><p>Go to your Netlify site to chat.</p>")
+        elif self.path == "/" or self.path == "/index.html":
+            # Sur Render, on sert le site HTML ici aussi
+            if IS_RENDER:
+                try:
+                    body = INDEX_FILE.read_bytes()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self._cors()
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception:
+                    self.send_error(500)
+            else:
+                self.send_error(404)
         else:
             self.send_error(404)
 
@@ -218,7 +222,7 @@ class AshAPI(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-# ---------- SITE ----------
+# ---------- SITE (uniquement en local) ----------
 class SiteHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
@@ -275,16 +279,15 @@ def main():
     print("        Ash.ia — Starting")
     print("=" * 40)
 
-    if not INDEX_FILE.exists() and not IS_RENDER:
+    if not INDEX_FILE.exists():
         log(f"❌ index.html not found in {BASE_DIR}")
         sys.exit(1)
 
     if IS_RENDER:
-        # Sur Render, on ne lance QUE l'API
-        log("Starting API only (Render mode)...")
-        run_server(AshAPI, API_PORT, "API Ash.ia", host="0.0.0.0")
+        log("Starting API + Site (Render mode) on the same port...")
+        # Sur Render, on sert tout sur le même port
+        run_server(AshAPI, API_PORT, "Ash.ia (API+Site)", host="0.0.0.0")
     else:
-        # En local, on lance tout
         if not port_free(API_PORT):
             log(f"❌ Port {API_PORT} is already in use.")
             sys.exit(1)
