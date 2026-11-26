@@ -1,5 +1,5 @@
 """
-Ash.ia — lanceur tout-en-un.
+Ash.ia — Lanceur universel (Render + Local).
 Usage : python ash.py
 """
 import json
@@ -16,25 +16,35 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-# ---------- CONFIG ----------
-OLLAMA_URL   = "http://127.0.0.1:11434/api/chat"
-OLLAMA_TAGS  = "http://127.0.0.1:11434/api/tags"
-# 3B est le meilleur compromis pour 8 Go de RAM
-DEFAULT_MODEL = "qwen2.5-coder:3b" 
-HOST      = "127.0.0.1"
-API_PORT  = 8000
+# ---------- CONFIGURATION ----------
+# Détection de l'environnement Render
+IS_RENDER = os.environ.get("RENDER") is not None
+
+# L'adresse de ton Ollama (via ngrok)
+# ⚠️ REMPLACE CE LIEN par ton adresse ngrok actuelle
+OLLAMA_URL = "https://TON-LIEN-NGROK.ngrok-free.app/api/chat"
+OLLAMA_TAGS = "https://TON-LIEN-NGROK.ngrok-free.app/api/tags"
+
+DEFAULT_MODEL = "qwen2.5-coder:3b"
+
+# Ports : Render utilise la variable PORT, en local on garde 8000 et 8080
+API_PORT = int(os.environ.get("PORT", 8000)) if IS_RENDER else 8000
 SITE_PORT = 8080
-BASE_DIR   = Path(__file__).parent.resolve()
+
+# Hôte : Render exige 0.0.0.0, en local on garde 127.0.0.1
+HOST = "0.0.0.0" if IS_RENDER else "127.0.0.1"
+
+BASE_DIR = Path(__file__).parent.resolve()
 INDEX_FILE = BASE_DIR / "index.html"
 
-# Options Ollama adaptées à la RAM et à la vitesse
+# Options Ollama
 OLLAMA_OPTIONS = {
-    "temperature": 0.6,       
+    "temperature": 0.6,
     "top_p": 0.9,
     "top_k": 40,
     "repeat_penalty": 1.1,
-    "num_predict": 2048,      # Assez pour du code long, mais évite de surcharger
-    "num_ctx": 4096,          # Réduit pour épargner la RAM (8 Go)
+    "num_predict": 2048,
+    "num_ctx": 4096,
 }
 
 def log(msg):
@@ -69,6 +79,11 @@ def port_free(port):
         s.close()
 
 def ensure_ollama():
+    # Sur Render, on ne lance pas Ollama
+    if IS_RENDER:
+        log("Render environment detected. Skipping local Ollama startup.")
+        return None
+        
     if http_get_ok(OLLAMA_TAGS):
         log("Ollama already running ✔")
         return None
@@ -89,6 +104,8 @@ def ensure_ollama():
     return proc
 
 def check_model():
+    if IS_RENDER:
+        return
     try:
         with urllib.request.urlopen(OLLAMA_TAGS, timeout=5) as r:
             data = json.loads(r.read())
@@ -97,11 +114,12 @@ def check_model():
         if any(DEFAULT_MODEL in n or n.startswith(base) for n in names):
             log(f"Model {DEFAULT_MODEL} present ✔")
             return
-        log(f"Model {DEFAULT_MODEL} missing — downloading (may take a while)...")
+        log(f"Model {DEFAULT_MODEL} missing — downloading...")
         subprocess.run(["ollama", "pull", DEFAULT_MODEL], check=False)
     except Exception as e:
         log(f"⚠ Could not check model: {e}")
 
+# ---------- API ----------
 class AshAPI(BaseHTTPRequestHandler):
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -123,6 +141,12 @@ class AshAPI(BaseHTTPRequestHandler):
             self._cors()
             self.end_headers()
             self.wfile.write(b'{"status":"ok"}')
+        elif self.path == "/" and IS_RENDER:
+            # Petite page d'accueil pour Render
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"<h1>Ash.ia API is running</h1><p>Go to your Netlify site to chat.</p>")
         else:
             self.send_error(404)
 
@@ -194,6 +218,7 @@ class AshAPI(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+# ---------- SITE ----------
 class SiteHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
@@ -231,13 +256,14 @@ class SiteHandler(BaseHTTPRequestHandler):
         except Exception:
             self.send_error(500)
 
-def run_server(handler, port, name):
+def run_server(handler, port, name, host=None):
+    host = host or HOST
     try:
-        server = ThreadingHTTPServer((HOST, port), handler)
+        server = ThreadingHTTPServer((host, port), handler)
     except OSError as e:
-        log(f"❌ {name}: cannot open port {port} — {e}")
+        log(f"❌ {name}: cannot open port {port} on {host} — {e}")
         return
-    log(f"{name} on http://{HOST}:{port}")
+    log(f"{name} on http://{host}:{port}")
     try:
         server.serve_forever()
     except Exception:
@@ -249,45 +275,49 @@ def main():
     print("        Ash.ia — Starting")
     print("=" * 40)
 
-    if not INDEX_FILE.exists():
+    if not INDEX_FILE.exists() and not IS_RENDER:
         log(f"❌ index.html not found in {BASE_DIR}")
         sys.exit(1)
 
-    if not port_free(API_PORT):
-        log(f"❌ Port {API_PORT} is already in use.")
-        sys.exit(1)
-    if not port_free(SITE_PORT):
-        log(f"❌ Port {SITE_PORT} is already in use.")
-        sys.exit(1)
+    if IS_RENDER:
+        # Sur Render, on ne lance QUE l'API
+        log("Starting API only (Render mode)...")
+        run_server(AshAPI, API_PORT, "API Ash.ia", host="0.0.0.0")
+    else:
+        # En local, on lance tout
+        if not port_free(API_PORT):
+            log(f"❌ Port {API_PORT} is already in use.")
+            sys.exit(1)
+        if not port_free(SITE_PORT):
+            log(f"❌ Port {SITE_PORT} is already in use.")
+            sys.exit(1)
 
-    ollama_proc = ensure_ollama()
-    check_model()
+        ollama_proc = ensure_ollama()
+        check_model()
 
-    threading.Thread(target=run_server, args=(AshAPI, API_PORT, "API Ash.ia"), daemon=True).start()
-    threading.Thread(target=run_server, args=(SiteHandler, SITE_PORT, "Site"), daemon=True).start()
+        threading.Thread(target=run_server, args=(AshAPI, API_PORT, "API Ash.ia"), daemon=True).start()
+        threading.Thread(target=run_server, args=(SiteHandler, SITE_PORT, "Site"), daemon=True).start()
 
-    wait_for(f"http://{HOST}:{API_PORT}/health", "API", 10)
-    wait_for(f"http://{HOST}:{SITE_PORT}/index.html", "Site", 10)
+        wait_for(f"http://{HOST}:{API_PORT}/health", "API", 10)
+        wait_for(f"http://{HOST}:{SITE_PORT}/index.html", "Site", 10)
 
-    url = f"http://{HOST}:{SITE_PORT}/index.html"
-    log(f"Opening {url}")
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
+        url = f"http://{HOST}:{SITE_PORT}/index.html"
+        log(f"Opening {url}")
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
 
-    log("Ash.ia is ready. Press Ctrl+C to stop.")
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        log("Shutting down...")
-        if ollama_proc:
-            try: ollama_proc.terminate()
-            except Exception: pass
-        sys.exit(0)
+        log("Ash.ia is ready. Press Ctrl+C to stop.")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            log("Shutting down...")
+            if ollama_proc:
+                try: ollama_proc.terminate()
+                except Exception: pass
+            sys.exit(0)
 
 if __name__ == "__main__":
-    # On ne lance que le serveur API, on ne démarre pas Ollama (il est sur ton PC)
-    print("Ash.ia API démarrée")
-    run_server(AshAPI, API_PORT, "API Ash.ia")
+    main()
